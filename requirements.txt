@@ -1,0 +1,2 @@
+disco-py
+opuslib==3.0.1
