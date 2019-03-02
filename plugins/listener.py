@@ -1,10 +1,10 @@
+import queue
+
 from disco.bot import Plugin
 from disco.bot.command import CommandError
 from disco.voice.client import VoiceException
-
 import opuslib.api
 import opuslib.api.decoder
-import opuslib.api.ctl
 
 
 class Listener:
@@ -12,8 +12,9 @@ class Listener:
         self.client = client
         self.is_recording = False
         # TODO: prevent collisions
-        self.ofile = None
+        self.user_ofiles = {}
         self.dec = opuslib.api.decoder.create_state(48000, 2)
+        self.wqueue = queue.Queue()
 
 class ListenerPlugin(Plugin):
 
@@ -49,8 +50,9 @@ class ListenerPlugin(Plugin):
             return event.msg.reply("I'm already not in any voice channel on this server.")
         else:
             listener.client.disconnect()
-            if listener.ofile:
-                listener.ofile.close()
+            for (uid, f) in listener.user_ofiles.items():
+                f.close()
+            listener.user_ofiles = {}
             del(self.guild_listeners[event.guild.id])
 
 
@@ -61,11 +63,22 @@ class ListenerPlugin(Plugin):
             return event.msg.reply("I'm not in any voice channel on this server.")
         if listener.is_recording:
             return event.msg.reply("I'm already recording.")
-        listener.ofile = open("out.raw", 'wb')
         listener.is_recording = True
 
         user = event.guild.get_member(event.author)
         event.msg.reply("Recording: {}".format(user))
+        while(listener.is_recording):
+            user_id, pcm = listener.wqueue.get()
+            if user_id:
+                if user_id not in listener.user_ofiles:
+                    listener.user_ofiles[user_id] = open(str(user_id) + ".raw", 'wb')
+                    print(listener.user_ofiles[user_id])
+                listener.user_ofiles[user_id].write(pcm)
+                listener.user_ofiles[user_id].flush()
+        for (uid, f) in listener.user_ofiles.items():
+            f.close()
+        listener.user_ofiles = {}
+        event.msg.reply("Stopped recording.")
 
     @Plugin.command('stop')
     def on_stop(self, event):
@@ -74,9 +87,8 @@ class ListenerPlugin(Plugin):
             return event.msg.reply("I'm not in any voice channel on this server.")
         if not listener.is_recording:
             return event.msg.reply("I'm not recoding at the moment.")
-        listener.ofile.close()
         listener.is_recording = False
-        event.msg.reply("Stopped recording.")
+        listener.wqueue.put((None, bytes(0))) # need to trigger last queue read iteration
 
     @Plugin.listen('VoiceData')
     def on_voice_data(self, event):
@@ -86,4 +98,4 @@ class ListenerPlugin(Plugin):
             print("VOICE DATA from {}, type: {}, rtp: {}, nonce: {}, len(event.data): {}".format(user, event.payload_type, event.rtp, event.nonce, len(event.data)))
             frame_size = int((48000) * len(event.data))
             pcm = opuslib.api.decoder.decode(listener.dec, event.data, len(event.data), frame_size, 0)
-            listener.ofile.write(pcm)
+            listener.wqueue.put((event.user_id, pcm))
